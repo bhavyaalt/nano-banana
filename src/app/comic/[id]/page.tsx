@@ -18,13 +18,33 @@ const FALLBACK_IMAGES = [
 const CAMERA_ANGLES = ['close-up', 'medium shot', 'wide shot', 'over-the-shoulder', 'dramatic angle', 'birds eye'];
 const EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'thoughtful', 'scared', 'romantic'];
 
-// Generate image using Nano Banana Pro API
-async function generateImage(prompt: string, style: string, tone: string, seed?: number): Promise<{ imageUrl: string; prompt: string }> {
+interface CharacterUpload {
+  id: string;
+  name: string;
+  images: string[];
+}
+
+// Generate image using API - supports both text-to-image and image-to-image with character refs
+async function generateImage(
+  prompt: string, 
+  style: string, 
+  tone: string, 
+  seed?: number,
+  referenceImage?: string
+): Promise<{ imageUrl: string; prompt: string }> {
   try {
     const response = await fetch('/api/generate', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, style, tone, aspectRatio: '2:3', seed }),
+      body: JSON.stringify({ 
+        prompt, 
+        style, 
+        tone, 
+        aspectRatio: '2:3', 
+        seed,
+        referenceImage,
+        mode: referenceImage ? 'image-to-image' : 'text-to-image'
+      }),
     });
 
     if (!response.ok) {
@@ -55,6 +75,32 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
   const [selectedPanel, setSelectedPanel] = useState<string | null>(null);
   const [editPrompt, setEditPrompt] = useState('');
   const [editDialogue, setEditDialogue] = useState('');
+  const [characters, setCharacters] = useState<CharacterUpload[]>([]);
+
+  // Load character references from localStorage
+  useEffect(() => {
+    if (id) {
+      const stored = localStorage.getItem(`nano-banana-characters-${id}`);
+      if (stored) {
+        try {
+          setCharacters(JSON.parse(stored));
+        } catch (e) {
+          console.error('Failed to load characters:', e);
+        }
+      }
+    }
+  }, [id]);
+
+  // Get a random reference image from characters (cycles through)
+  const getCharacterReference = (panelIndex: number): string | undefined => {
+    if (characters.length === 0) return undefined;
+    
+    // Cycle through characters and their images
+    const allImages = characters.flatMap(c => c.images);
+    if (allImages.length === 0) return undefined;
+    
+    return allImages[panelIndex % allImages.length];
+  };
 
   // Generate panels on first load if empty
   useEffect(() => {
@@ -80,14 +126,15 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
         break;
       }
 
-      setGenerationStatus(`Generating panel ${i + 1} of ${panelCount}...`);
+      setGenerationStatus(`Generating panel ${i + 1} of ${panelCount}${characters.length > 0 ? ' (with character refs)' : ''}...`);
 
       const cameraAngle = CAMERA_ANGLES[Math.floor(Math.random() * CAMERA_ANGLES.length)];
       const emotion = EMOTIONS[Math.floor(Math.random() * EMOTIONS.length)];
       const scenePrompt = `${storyChunks[i]}, ${cameraAngle}, ${emotion} mood`;
       
       const seed = Math.floor(Math.random() * 1000000);
-      const { imageUrl, prompt } = await generateImage(scenePrompt, project.style, project.tone, seed);
+      const referenceImage = getCharacterReference(i);
+      const { imageUrl, prompt } = await generateImage(scenePrompt, project.style, project.tone, seed, referenceImage);
 
       const newPanel: Panel = {
         id: crypto.randomUUID(),
@@ -123,7 +170,9 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
     updatePanel(project.id, panelId, { isGenerating: true });
     
     const newSeed = Math.floor(Math.random() * 1000000);
-    const { imageUrl } = await generateImage(panel.sceneDescription, project.style, project.tone, newSeed);
+    const panelIndex = project.panels.findIndex(p => p.id === panelId);
+    const referenceImage = getCharacterReference(panelIndex);
+    const { imageUrl } = await generateImage(panel.sceneDescription, project.style, project.tone, newSeed, referenceImage);
     
     updatePanel(project.id, panelId, {
       imageUrl,
@@ -168,12 +217,15 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
       isGenerating: true,
     });
 
+    const panelId = selectedPanel;
+    const panelIndex = project.panels.findIndex(p => p.id === panelId);
     setSelectedPanel(null);
 
     const newSeed = Math.floor(Math.random() * 1000000);
-    const { imageUrl, prompt } = await generateImage(editPrompt, project.style, project.tone, newSeed);
+    const referenceImage = getCharacterReference(panelIndex);
+    const { imageUrl, prompt } = await generateImage(editPrompt, project.style, project.tone, newSeed, referenceImage);
     
-    updatePanel(project.id, selectedPanel, {
+    updatePanel(project.id, panelId, {
       imageUrl,
       prompt,
       isGenerating: false,
@@ -248,7 +300,9 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
     
     addPanel(project.id, tempPanel);
 
-    const { imageUrl, prompt } = await generateImage('a new comic panel scene', project.style, project.tone, seed);
+    const panelIndex = project.panels.length; // New panel will be at the end
+    const referenceImage = getCharacterReference(panelIndex);
+    const { imageUrl, prompt } = await generateImage('a new comic panel scene', project.style, project.tone, seed, referenceImage);
     
     updatePanel(project.id, tempPanel.id, {
       imageUrl,
