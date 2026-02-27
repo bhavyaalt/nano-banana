@@ -5,8 +5,8 @@ import Link from 'next/link';
 import { useComicStore, Panel } from '@/store/comic-store';
 import { jsPDF } from 'jspdf';
 
-// Mock panel images for MVP
-const MOCK_IMAGES = [
+// Fallback images when API is not configured
+const FALLBACK_IMAGES = [
   'https://picsum.photos/seed/comic1/400/600',
   'https://picsum.photos/seed/comic2/400/600',
   'https://picsum.photos/seed/comic3/400/600',
@@ -18,12 +18,40 @@ const MOCK_IMAGES = [
 const CAMERA_ANGLES = ['close-up', 'medium shot', 'wide shot', 'over-the-shoulder', 'dramatic angle', 'birds eye'];
 const EMOTIONS = ['happy', 'sad', 'angry', 'surprised', 'thoughtful', 'scared', 'romantic'];
 
+// Generate image using Nano Banana Pro API
+async function generateImage(prompt: string, style: string, tone: string, seed?: number): Promise<{ imageUrl: string; prompt: string }> {
+  try {
+    const response = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, style, tone, aspectRatio: '2:3', seed }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      console.error('API error:', error);
+      throw new Error(error.error || 'Generation failed');
+    }
+
+    const data = await response.json();
+    return { imageUrl: data.imageUrl, prompt: data.prompt };
+  } catch (error) {
+    console.error('Generation error:', error);
+    // Return fallback on error
+    return {
+      imageUrl: FALLBACK_IMAGES[Math.floor(Math.random() * FALLBACK_IMAGES.length)] + `?t=${Date.now()}`,
+      prompt: prompt,
+    };
+  }
+}
+
 export default function ComicEditorPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { projects, updateProject, addPanel, updatePanel, deletePanel, credits, useCredits } = useComicStore();
   const project = projects.find(p => p.id === id);
   
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generationStatus, setGenerationStatus] = useState('');
   const [selectedPanel, setSelectedPanel] = useState<string | null>(null);
   const [editPrompt, setEditPrompt] = useState('');
   const [editDialogue, setEditDialogue] = useState('');
@@ -42,7 +70,6 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
     setIsGenerating(true);
     updateProject(project.id, { status: 'generating' });
 
-    // Simulate AI panel generation
     const panelCount = Math.min(6, Math.floor(project.story.length / 100) + 3);
     const storyChunks = splitStory(project.story, panelCount);
 
@@ -53,47 +80,61 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
         break;
       }
 
-      await new Promise(resolve => setTimeout(resolve, 1500)); // Simulate generation time
+      setGenerationStatus(`Generating panel ${i + 1} of ${panelCount}...`);
+
+      const cameraAngle = CAMERA_ANGLES[Math.floor(Math.random() * CAMERA_ANGLES.length)];
+      const emotion = EMOTIONS[Math.floor(Math.random() * EMOTIONS.length)];
+      const scenePrompt = `${storyChunks[i]}, ${cameraAngle}, ${emotion} mood`;
+      
+      const seed = Math.floor(Math.random() * 1000000);
+      const { imageUrl, prompt } = await generateImage(scenePrompt, project.style, project.tone, seed);
 
       const newPanel: Panel = {
         id: crypto.randomUUID(),
-        imageUrl: MOCK_IMAGES[i % MOCK_IMAGES.length] + `?t=${Date.now()}`,
-        prompt: `${project.style} style comic panel, ${project.tone} tone, ${storyChunks[i]}`,
+        imageUrl,
+        prompt,
         sceneDescription: storyChunks[i],
-        cameraAngle: CAMERA_ANGLES[Math.floor(Math.random() * CAMERA_ANGLES.length)],
-        emotion: EMOTIONS[Math.floor(Math.random() * EMOTIONS.length)],
+        cameraAngle,
+        emotion,
         dialogue: extractDialogue(storyChunks[i]),
-        seed: Math.floor(Math.random() * 1000000),
+        seed,
         isGenerating: false,
       };
 
       addPanel(project.id, newPanel);
     }
 
+    setGenerationStatus('');
     updateProject(project.id, { status: 'editing' });
     setIsGenerating(false);
   };
 
   const regeneratePanel = async (panelId: string) => {
-    if (!project || !useCredits(2)) {
+    if (!project) return;
+    
+    const panel = project.panels.find(p => p.id === panelId);
+    if (!panel) return;
+
+    if (!useCredits(2)) {
       alert('Not enough credits!');
       return;
     }
 
     updatePanel(project.id, panelId, { isGenerating: true });
     
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    const newSeed = Math.floor(Math.random() * 1000000);
+    const { imageUrl } = await generateImage(panel.sceneDescription, project.style, project.tone, newSeed);
     
     updatePanel(project.id, panelId, {
-      imageUrl: MOCK_IMAGES[Math.floor(Math.random() * MOCK_IMAGES.length)] + `?t=${Date.now()}`,
+      imageUrl,
       isGenerating: false,
-      seed: Math.floor(Math.random() * 1000000),
+      seed: newSeed,
     });
   };
 
   const handleEditPanel = (panel: Panel) => {
     setSelectedPanel(panel.id);
-    setEditPrompt(panel.prompt);
+    setEditPrompt(panel.sceneDescription);
     setEditDialogue(panel.dialogue.join('\n'));
   };
 
@@ -103,11 +144,41 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
     const dialogueLines = editDialogue.split('\n').filter(l => l.trim());
     
     updatePanel(project.id, selectedPanel, {
-      prompt: editPrompt,
+      sceneDescription: editPrompt,
       dialogue: dialogueLines,
     });
     
     setSelectedPanel(null);
+  };
+
+  const saveAndRegeneratePanel = async () => {
+    if (!project || !selectedPanel) return;
+    
+    if (!useCredits(2)) {
+      alert('Not enough credits!');
+      return;
+    }
+
+    const dialogueLines = editDialogue.split('\n').filter(l => l.trim());
+    const panel = project.panels.find(p => p.id === selectedPanel);
+    
+    updatePanel(project.id, selectedPanel, {
+      sceneDescription: editPrompt,
+      dialogue: dialogueLines,
+      isGenerating: true,
+    });
+
+    setSelectedPanel(null);
+
+    const newSeed = Math.floor(Math.random() * 1000000);
+    const { imageUrl, prompt } = await generateImage(editPrompt, project.style, project.tone, newSeed);
+    
+    updatePanel(project.id, selectedPanel, {
+      imageUrl,
+      prompt,
+      isGenerating: false,
+      seed: newSeed,
+    });
   };
 
   const exportPDF = async () => {
@@ -152,6 +223,38 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
     }
 
     pdf.save(`${project.title || 'comic'}.pdf`);
+  };
+
+  const addNewPanel = async () => {
+    if (!project) return;
+    
+    if (!useCredits(3)) {
+      alert('Not enough credits!');
+      return;
+    }
+
+    const seed = Math.floor(Math.random() * 1000000);
+    const tempPanel: Panel = {
+      id: crypto.randomUUID(),
+      imageUrl: '',
+      prompt: '',
+      sceneDescription: 'New scene - click edit to customize',
+      cameraAngle: 'medium shot',
+      emotion: 'neutral',
+      dialogue: [],
+      seed,
+      isGenerating: true,
+    };
+    
+    addPanel(project.id, tempPanel);
+
+    const { imageUrl, prompt } = await generateImage('a new comic panel scene', project.style, project.tone, seed);
+    
+    updatePanel(project.id, tempPanel.id, {
+      imageUrl,
+      prompt,
+      isGenerating: false,
+    });
   };
 
   if (!project) {
@@ -213,7 +316,7 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
         {isGenerating && (
           <div className="bg-blue-500/20 text-blue-400 rounded-lg p-4 mb-8 flex items-center gap-3">
             <span className="animate-spin text-2xl">🍌</span>
-            <span>Generating panels... This may take a moment.</span>
+            <span>{generationStatus || 'Generating panels with Nano Banana Pro...'}</span>
           </div>
         )}
 
@@ -232,9 +335,12 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
 
                 {/* Panel Image */}
                 <div className="aspect-[2/3] relative">
-                  {panel.isGenerating ? (
+                  {panel.isGenerating || !panel.imageUrl ? (
                     <div className="absolute inset-0 flex items-center justify-center bg-gray-900">
-                      <span className="animate-spin text-4xl">🍌</span>
+                      <div className="text-center">
+                        <span className="animate-spin text-4xl block">🍌</span>
+                        <span className="text-sm text-gray-400 mt-2 block">Generating...</span>
+                      </div>
                     </div>
                   ) : (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -246,7 +352,7 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
                   )}
                   
                   {/* Dialogue Overlay */}
-                  {panel.dialogue.length > 0 && !panel.isGenerating && (
+                  {panel.dialogue.length > 0 && !panel.isGenerating && panel.imageUrl && (
                     <div className="absolute bottom-4 left-4 right-4">
                       <div className="speech-bubble text-sm">
                         {panel.dialogue[0]}
@@ -288,24 +394,7 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
 
             {/* Add Panel Button */}
             <button
-              onClick={() => {
-                if (useCredits(3)) {
-                  const newPanel: Panel = {
-                    id: crypto.randomUUID(),
-                    imageUrl: MOCK_IMAGES[Math.floor(Math.random() * MOCK_IMAGES.length)] + `?t=${Date.now()}`,
-                    prompt: `${project.style} style comic panel`,
-                    sceneDescription: 'New scene',
-                    cameraAngle: 'medium shot',
-                    emotion: 'neutral',
-                    dialogue: [],
-                    seed: Math.floor(Math.random() * 1000000),
-                    isGenerating: false,
-                  };
-                  addPanel(project.id, newPanel);
-                } else {
-                  alert('Not enough credits!');
-                }
-              }}
+              onClick={addNewPanel}
               className="border-2 border-dashed border-gray-700 hover:border-yellow-500 rounded-lg aspect-[2/3] flex flex-col items-center justify-center gap-2 text-gray-500 hover:text-yellow-400 transition"
             >
               <span className="text-4xl">+</span>
@@ -316,7 +405,7 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
           <div className="text-center py-20">
             <div className="text-6xl mb-4">🎨</div>
             <h2 className="text-2xl font-bold mb-2">No panels yet</h2>
-            <p className="text-gray-400 mb-6">Click below to generate your comic panels</p>
+            <p className="text-gray-400 mb-6">Click below to generate your comic panels with Nano Banana Pro</p>
             <button
               onClick={generatePanels}
               className="bg-yellow-500 hover:bg-yellow-400 text-black font-bold px-8 py-4 rounded-lg transition"
@@ -366,7 +455,11 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
                     {CAMERA_ANGLES.map((angle) => (
                       <button
                         key={angle}
-                        onClick={() => setEditPrompt(prev => prev.replace(/close-up|medium shot|wide shot|over-the-shoulder|dramatic angle|birds eye/gi, angle))}
+                        onClick={() => setEditPrompt(prev => {
+                          // Remove existing camera angles and add new one
+                          const cleaned = prev.replace(/close-up|medium shot|wide shot|over-the-shoulder|dramatic angle|birds eye/gi, '').trim();
+                          return `${cleaned}, ${angle}`;
+                        })}
                         className="bg-gray-800 hover:bg-gray-700 px-3 py-2 rounded-lg text-sm transition capitalize"
                       >
                         {angle}
@@ -375,9 +468,9 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
                   </div>
                 </div>
 
-                {/* Prompt */}
+                {/* Scene Description */}
                 <div>
-                  <label className="block text-sm font-semibold mb-2">Scene Prompt</label>
+                  <label className="block text-sm font-semibold mb-2">Scene Description</label>
                   <textarea
                     value={editPrompt}
                     onChange={(e) => setEditPrompt(e.target.value)}
@@ -403,16 +496,13 @@ export default function ComicEditorPage({ params }: { params: Promise<{ id: stri
                 <div className="flex gap-3 pt-4">
                   <button
                     onClick={saveEditedPanel}
-                    className="flex-1 bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3 rounded-lg transition"
+                    className="flex-1 bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 rounded-lg transition"
                   >
-                    Save Changes
+                    Save Text Only
                   </button>
                   <button
-                    onClick={() => {
-                      saveEditedPanel();
-                      regeneratePanel(selectedPanel);
-                    }}
-                    className="flex-1 bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 rounded-lg transition"
+                    onClick={saveAndRegeneratePanel}
+                    className="flex-1 bg-yellow-500 hover:bg-yellow-400 text-black font-bold py-3 rounded-lg transition"
                   >
                     Save & Regenerate (2 credits)
                   </button>
